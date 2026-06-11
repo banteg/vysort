@@ -51,7 +51,13 @@ def match_brute(src: str, target: bytes) -> dict:
     # layout recovery first: decode the deployed order straight off the
     # bytecode, then one reordered stock compile to verify — 2 compiles
     # total regardless of how many layouts are reachable
-    rec = recover_layout(src, target, EVM_VERSION)
+    # a decode crash must not kill the worker — brute force still rescues
+    # 25 of the 26 at-risk mainnet runtimes if recovery hits an unknown
+    # edge case (the decode found new ones in both validation rounds)
+    try:
+        rec = recover_layout(src, target, EVM_VERSION)
+    except Exception as e:
+        rec = {"status": f"recover_error: {type(e).__name__}: {e}"}
     if rec["status"] == "unsupported_minimal_proxy":
         return rec
     if rec["status"] == "decoded":
