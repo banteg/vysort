@@ -42,10 +42,17 @@ def is_affected(version: str) -> bool:
 
 
 def detect_vyper_version(src: str) -> str:
-    m = re.search(r"^#\s*(?:@version|pragma\s+version)\s+[\^~=<>!]*\s*([\d.]+)", src, re.M)
+    m = re.search(r"^#\s*(?:@version|pragma\s+version)\s+(.+)$", src, re.M)
     if not m:
         raise SystemExit("no version pragma in source; pass --vyper")
-    return m.group(1)
+    spec = m.group(1).strip()
+    exact = re.fullmatch(r"==?\s*(\d+\.\d+\.\d+\S*)|(\d+\.\d+\.\d+\S*)", spec)
+    if not exact:
+        raise SystemExit(
+            f"version pragma {spec!r} is a range, not a concrete compiler; "
+            "pass --vyper with the version the contract was deployed with"
+        )
+    return exact.group(1) or exact.group(2)
 
 
 def run_worker(worker: str, args, vyper_version: str, python: str) -> str:
@@ -73,10 +80,12 @@ def http_json(url: str, payload: dict | None = None, method: str = "POST") -> di
         headers={"Content-Type": "application/json", "User-Agent": "vysort"},
     )
     try:
-        with urllib.request.urlopen(req) as r:
+        with urllib.request.urlopen(req, timeout=30) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
         raise SystemExit(f"http {e.code} from {url}: {e.read().decode(errors='replace')}")
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise SystemExit(f"cannot reach {url}: {e}")
 
 
 def eth_rpc(rpc_url: str, method: str, params: list):
