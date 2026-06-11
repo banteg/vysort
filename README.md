@@ -75,11 +75,15 @@ vysort match contract.vy --runtime runtime.hex -o matched.vy
 vysort match contract.vy --address 0xf939... --rpc-url https://eth.example -o matched.vy
 ```
 
-Reachable layouts are compiled one by one (environment layout first) until the
-runtime matches: `exact`, or `prefix` when the deployed code carries an
-appended immutable tail. For unaffected compiler versions a single
-compile-and-compare runs instead. `--evm-version istanbul` helps pre-berlin
-deployments whose nonreentrant lock constants differ.
+The deployed layout is recovered in 2 compiles regardless of contract size:
+one instrumented compile maps each internal function's section boundaries and
+masks the layout-dependent address bytes, the deployed order is then decoded
+straight off the on-chain bytes, and one reordered stock compile verifies it
+byte-exactly — `exact`, or `prefix` when the deployed code carries an appended
+immutable tail. If the decode fails, reachable layouts are brute-forced one
+compile at a time (environment layout first). For unaffected compiler versions
+a single compile-and-compare runs instead. `--evm-version istanbul` helps
+pre-berlin deployments whose nonreentrant lock constants differ.
 
 Verify on sourcify — fetches the code, brute-forces the layout, and submits
 the matched source through the standard flow with a stock compiler:

@@ -19,6 +19,7 @@ import sys
 
 import vyper
 from check import capture_call_graph, enumerate_layouts, simulate
+from recover import recover_layout
 from reorder import reorder
 
 EVM_VERSION = sys.argv[4] if len(sys.argv) > 4 else None
@@ -47,6 +48,27 @@ def match_single(src: str, target: bytes) -> dict:
 
 
 def match_brute(src: str, target: bytes) -> dict:
+    # layout recovery first: decode the deployed order straight off the
+    # bytecode, then one reordered stock compile to verify — 2 compiles
+    # total regardless of how many layouts are reachable
+    rec = recover_layout(src, target, EVM_VERSION)
+    if rec["status"] == "unsupported_minimal_proxy":
+        return rec
+    if rec["status"] == "decoded":
+        reordered = reorder(src, rec["proof_order"])
+        verdict = compare(target, compile_runtime(reordered))
+        if verdict:
+            return {
+                **verdict,
+                "method": "recovery",
+                "layout": rec["proof_order"],
+                "compiles": 2,
+                "source": reordered,
+            }
+        print("recovered order did not verify, falling back to brute force", file=sys.stderr)
+    else:
+        print(f"layout recovery unavailable ({rec['status']}), falling back to brute force", file=sys.stderr)
+
     captured = capture_call_graph(src)
     source_order = captured.pop("__source_order__")
     internal = {n: v["internal"] for n, v in captured.items()}
@@ -68,12 +90,18 @@ def match_brute(src: str, target: bytes) -> dict:
         if verdict:
             return {
                 **verdict,
+                "method": "brute",
                 "layout": list(layout),
                 "attempts": i,
                 "reachable_layouts": len(candidates),
                 "source": reordered,
             }
-    return {"status": "no_match", "attempts": len(candidates), "reachable_layouts": len(candidates)}
+    return {
+        "status": "no_match",
+        "method": "brute",
+        "attempts": len(candidates),
+        "reachable_layouts": len(candidates),
+    }
 
 
 if __name__ == "__main__":
