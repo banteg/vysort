@@ -62,7 +62,7 @@ def recover_layout(src: str, onchain: bytes, evm_version=None) -> dict:
 
     Returns {"status": "decoded", "proof_order": [...], ...} on success;
     other statuses: unsupported_minimal_proxy, too_few_sections,
-    decode_failed."""
+    initcode_passed, decode_failed."""
     m = EIP1167_RE.match(onchain.hex())
     if m:
         return {"status": "unsupported_minimal_proxy", "implementation": "0x" + m.group(1)}
@@ -140,6 +140,23 @@ def recover_layout(src: str, onchain: bytes, evm_version=None) -> dict:
         return all(onchain[off + i - lo] == bc[i] for i in range(lo, hi) if i not in mask)
 
     external_ok = eq_masked(0, 0, movable_start)
+
+    if not external_ok:
+        deploy_bc = data.bytecode
+        runtime_offset = deploy_bc.find(bc)
+        if (
+            runtime_offset >= 0
+            and len(onchain) == len(deploy_bc)
+            and onchain[: min(runtime_offset, 32)] == deploy_bc[: min(runtime_offset, 32)]
+            and eq_masked(runtime_offset, 0, movable_start)
+        ):
+            return {
+                "status": "initcode_passed",
+                "reason": "target looks like Vyper creation bytecode, but layout recovery expects deployed runtime bytecode",
+                "runtime_offset": runtime_offset,
+                "runtime_bytes": len(bc),
+                "hint": "pass deployed runtime bytecode from eth_getCode/cast code, or extract/simulate the creation result before matching",
+            }
 
     cursor, deployed, remaining = movable_start, [], set(order)
     while remaining:

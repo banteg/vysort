@@ -63,6 +63,11 @@ vysort match contract.vy --address 0x2cced4ff... --rpc-url https://eth.drpc.org 
 vysort match contract.vy --runtime runtime.hex -o matched.vy
 ```
 
+`--runtime` expects deployed runtime bytecode (`eth_getCode`, `cast code`, or
+Vyper's `-f bytecode_runtime`). If you accidentally pass Vyper `-f bytecode`
+creation bytecode, vysort reports the embedded runtime offset instead of
+falling into layout brute force.
+
 The deployed layout is recovered in 2 compiles regardless of contract size:
 one instrumented compile maps each internal function's section boundaries and
 masks the layout-dependent address bytes, the deployed order is then decoded

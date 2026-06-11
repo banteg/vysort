@@ -1,6 +1,6 @@
 [project]
 name = "vysort"
-version = "0.1.0"
+version = "0.1.1"
 description = "Make vyper 0.3.4-0.3.7 bytecode deterministic by forcing the internal-function layout"
 readme = "README.md"
 authors = [

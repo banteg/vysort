@@ -60,6 +60,8 @@ def match_brute(src: str, target: bytes) -> dict:
         rec = {"status": f"recover_error: {type(e).__name__}: {e}"}
     if rec["status"] == "unsupported_minimal_proxy":
         return rec
+    if rec["status"] == "initcode_passed":
+        return rec
     if rec["status"] == "decoded":
         reordered = reorder(src, rec["proof_order"])
         verdict = compare(target, compile_runtime(reordered))
