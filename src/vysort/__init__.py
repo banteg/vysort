@@ -114,6 +114,23 @@ def run_match(
     return json.loads(out)
 
 
+def run_preflight(payload: dict, runtime_hex: str, vyper_version: str, python: str) -> dict:
+    """Compile the exact submission payload via vyper's std-json path and
+    compare against the deployed runtime."""
+    clean = "".join(runtime_hex.split()).removeprefix("0x")
+    with tempfile.NamedTemporaryFile("w", suffix=".json") as fj, tempfile.NamedTemporaryFile(
+        "w", suffix=".hex"
+    ) as fh:
+        json.dump(payload["stdJsonInput"], fj)
+        fj.flush()
+        fh.write(clean)
+        fh.flush()
+        out = run_worker(
+            "preflight", [fj.name, fh.name, payload["contractIdentifier"]], vyper_version, python
+        )
+    return json.loads(out)
+
+
 def compiler_version_string(vyper_version: str, python: str) -> str:
     """Full version with commit hash as sourcify expects it, e.g. 0.3.7+commit.6020b8bb.
 
@@ -284,15 +301,30 @@ def main() -> None:
         }
         if args.creation_tx:
             payload["creationTransactionHash"] = args.creation_tx
+        preflight = run_preflight(payload, runtime_hex, vyper_version, args.python)
+        if preflight["status"] not in ("exact", "prefix"):
+            print(json.dumps({"match": result, "preflight": preflight}, indent=2))
+            raise SystemExit(
+                f"preflight std-json compile does not reproduce the runtime "
+                f"(status: {preflight['status']}); not submitting"
+            )
+        print(f"preflight: std-json payload reproduces the runtime ({preflight['status']})", file=sys.stderr)
         if args.dry_run:
             print(json.dumps(
-                {"chain_id": chain_id, "address": args.address, "match": result, "payload": payload},
+                {
+                    "chain_id": chain_id,
+                    "address": args.address,
+                    "match": result,
+                    "preflight": preflight,
+                    "payload": payload,
+                },
                 indent=2,
             ))
             return
         job = sourcify_verify(args.sourcify_url, chain_id, args.address, payload)
         report = {
             "match": result["status"],
+            "preflight": preflight["status"],
             "layout": result.get("layout"),
             "contract": job.get("contract"),
             "error": job.get("error"),
