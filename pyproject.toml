@@ -1,0 +1,17 @@
+[project]
+name = "vysort"
+version = "0.1.0"
+description = "Make vyper 0.3.4-0.3.7 bytecode deterministic by forcing the internal-function layout"
+readme = "README.md"
+authors = [
+    { name = "banteg", email = "4562643+banteg@users.noreply.github.com" }
+]
+requires-python = ">=3.10"
+dependencies = ["uv"]
+
+[project.scripts]
+vysort = "vysort:main"
+
+[build-system]
+requires = ["uv_build>=0.11.17,<0.12.0"]
+build-backend = "uv_build"
