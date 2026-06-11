@@ -34,7 +34,7 @@ version pragma (override with `--vyper`), on python 3.10 by default
 If your vyper 0.3.x contract fails verification, this is the command:
 
 ```sh
-vysort verify contract.vy --address 0x2cced4ff... --rpc-url https://eth.example
+vysort verify contract.vy --address 0x2cced4ff... --rpc-url https://eth.drpc.org
 ```
 
 It fetches the deployed code and chain id from the RPC, recovers the deployed
@@ -59,7 +59,7 @@ To recover the layout and prove the match locally — against on-chain code or
 a hex file — without involving a verifier:
 
 ```sh
-vysort match contract.vy --address 0x2cced4ff... --rpc-url https://eth.example -o matched.vy
+vysort match contract.vy --address 0x2cced4ff... --rpc-url https://eth.drpc.org -o matched.vy
 vysort match contract.vy --runtime runtime.hex -o matched.vy
 ```
 
