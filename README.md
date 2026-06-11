@@ -51,6 +51,9 @@ at risk. Otherwise `layouts` (when small) enumerates every layout the deployer
 could have gotten, ready for brute-force: reorder per candidate and
 stock-compile each until the bytecode matches.
 
+The check is version-aware: sources targeting compilers outside the affected
+0.3.4–0.3.7 band short-circuit to `immune: true` without compiling.
+
 Force a layout by rewriting the source:
 
 ```sh
@@ -63,3 +66,30 @@ The layout is a comma-separated list of internal function names or a JSON file
 vyper 0.3.7 yields the same bytecode the original source produces under that
 internal layout — auxdata contains no source hash, so the output is
 byte-identical.
+
+Find the deployed layout by matching against the runtime bytecode, from a hex
+file or fetched on-chain:
+
+```sh
+vysort match contract.vy --runtime runtime.hex -o matched.vy
+vysort match contract.vy --address 0xf939... --rpc-url https://eth.example -o matched.vy
+```
+
+Reachable layouts are compiled one by one (environment layout first) until the
+runtime matches: `exact`, or `prefix` when the deployed code carries an
+appended immutable tail. For unaffected compiler versions a single
+compile-and-compare runs instead. `--evm-version istanbul` helps pre-berlin
+deployments whose nonreentrant lock constants differ.
+
+Verify on sourcify — fetches the code, brute-forces the layout, and submits
+the matched source through the standard flow with a stock compiler:
+
+```sh
+vysort verify contract.vy --address 0xf939... --rpc-url https://eth.example
+```
+
+The chain id comes from the RPC. Use `--dry-run` to inspect the submission
+payload, `--creation-tx` to help the creation match, and `--sourcify-url` to
+target another server. Note: creation matches are only guaranteed when
+`__init__` calls ≤1 internal function; the init-callee section of creation
+code is not forced by source order.

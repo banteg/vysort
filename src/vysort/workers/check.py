@@ -87,6 +87,34 @@ def decision_points(source_order, callee_order, internal):
     return points
 
 
+def enumerate_layouts(source_order, callee_order, internal):
+    """Enumerate per-set permutations (cartesian product), cap with sampling.
+
+    Returns (layouts, exact, choice_space)."""
+    multi = [n for n, c in callee_order.items() if len(c) >= 2]
+    space = 1
+    for n in multi:
+        for i in range(2, len(callee_order[n]) + 1):
+            space *= i
+    layouts = set()
+    if space <= ENUMERATION_CAP:
+        pools = [list(itertools.permutations(callee_order[n])) for n in multi]
+        for combo in itertools.product(*pools):
+            co = dict(callee_order)
+            co.update({n: list(p) for n, p in zip(multi, combo)})
+            layouts.add(simulate(source_order, co, internal))
+        return layouts, True, space
+    rng = random.Random(1)
+    for _ in range(ENUMERATION_CAP):
+        co = dict(callee_order)
+        for n in multi:
+            p = callee_order[n][:]
+            rng.shuffle(p)
+            co[n] = p
+        layouts.add(simulate(source_order, co, internal))
+    return layouts, False, space
+
+
 def check(src: str) -> dict:
     captured = capture_call_graph(src)
     source_order = captured.pop("__source_order__")
@@ -95,31 +123,7 @@ def check(src: str) -> dict:
 
     env_layout = simulate(source_order, base_callees, internal)
     dps = decision_points(source_order, base_callees, internal)
-
-    # enumerate per-set permutations (cartesian product), cap with sampling
-    multi = [n for n, c in base_callees.items() if len(c) >= 2]
-    space = 1
-    for n in multi:
-        for i in range(2, len(base_callees[n]) + 1):
-            space *= i
-    layouts = set()
-    if space <= ENUMERATION_CAP:
-        pools = [list(itertools.permutations(base_callees[n])) for n in multi]
-        for combo in itertools.product(*pools):
-            co = dict(base_callees)
-            co.update({n: list(p) for n, p in zip(multi, combo)})
-            layouts.add(simulate(source_order, co, internal))
-        exact = True
-    else:
-        rng = random.Random(1)
-        for _ in range(ENUMERATION_CAP):
-            co = dict(base_callees)
-            for n in multi:
-                p = base_callees[n][:]
-                rng.shuffle(p)
-                co[n] = p
-            layouts.add(simulate(source_order, co, internal))
-        exact = False
+    layouts, exact, space = enumerate_layouts(source_order, base_callees, internal)
 
     return {
         "internal_fns": sum(internal.values()),
