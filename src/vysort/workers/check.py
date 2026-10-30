@@ -14,41 +14,28 @@ imports nothing from vysort. argv: <source.vy>; JSON report on stdout.
 
 import itertools
 import json
+import math
 import pathlib
 import random
 import sys
 
-import vyper.codegen.module as module_mod
 from vyper.compiler.phases import CompilerData
 
 ENUMERATION_CAP = 20000
 
 
-def capture_call_graph(src: str) -> dict:
-    """Compile once with an instrumented _topsort; return the call graph."""
-    captured = {}
-    orig_topsort = module_mod._topsort
-
-    def capturing_topsort(functions):
-        if not captured:
-            for f in functions:
-                t = f._metadata["type"]
-                captured[f.name] = {
-                    "callees": [c.name for c in t.called_functions],  # env iteration order
-                    "internal": t.is_internal,
-                }
-            captured["__source_order__"] = [f.name for f in functions]
-        return orig_topsort(functions)
-
-    module_mod._topsort = capturing_topsort
-    try:
-        CompilerData(src).bytecode_runtime  # triggers codegen -> capture
-    finally:
-        module_mod._topsort = orig_topsort
-    return captured
+def call_graph(data: CompilerData):
+    """Read the function list passed to _topsort, in source order."""
+    callees, internal = {}, set()
+    for f in data.global_ctx._function_defs:
+        typ = f._metadata["type"]
+        callees[f.name] = [c.name for c in typ.called_functions]
+        if typ.is_internal:
+            internal.add(f.name)
+    return callees, internal
 
 
-def simulate(source_order, callee_order, internal):
+def simulate(callee_order, internal):
     """Replicate _topsort + dedup-first; return internal layout tuple."""
     placed = []
     placed_set = set()
@@ -62,12 +49,12 @@ def simulate(source_order, callee_order, internal):
             placed.append(f)
             placed_set.add(f)
 
-    for f in source_order:
+    for f in callee_order:
         helper(f)
-    return tuple(f for f in placed if internal.get(f))
+    return tuple(f for f in placed if f in internal)
 
 
-def decision_points(source_order, callee_order, internal):
+def decision_points(callee_order, internal):
     """Count sets that, at first visit, contain >=2 unplaced callees."""
     points = []
     placed = set()
@@ -76,33 +63,33 @@ def decision_points(source_order, callee_order, internal):
         if f in placed:
             return
         unplaced = [c for c in callee_order[f] if c not in placed]
-        if len([c for c in unplaced if internal.get(c)]) >= 2:
+        if sum(c in internal for c in unplaced) >= 2:
             points.append((f, len(unplaced)))
         for c in callee_order[f]:
             helper(c)
         placed.add(f)
 
-    for f in source_order:
+    for f in callee_order:
         helper(f)
     return points
 
 
-def enumerate_layouts(source_order, callee_order, internal):
+def enumerate_layouts(callee_order, internal, env_layout, decisions):
     """Enumerate per-set permutations (cartesian product), cap with sampling.
 
     Returns (layouts, exact, choice_space)."""
     multi = [n for n, c in callee_order.items() if len(c) >= 2]
-    space = 1
-    for n in multi:
-        for i in range(2, len(callee_order[n]) + 1):
-            space *= i
+    space = math.prod(math.factorial(len(callee_order[n])) for n in multi)
+    if not decisions:
+        # Permuting already-placed callees cannot change the DFS output.
+        return {env_layout}, True, space
     layouts = set()
     if space <= ENUMERATION_CAP:
         pools = [list(itertools.permutations(callee_order[n])) for n in multi]
         for combo in itertools.product(*pools):
             co = dict(callee_order)
             co.update({n: list(p) for n, p in zip(multi, combo)})
-            layouts.add(simulate(source_order, co, internal))
+            layouts.add(simulate(co, internal))
         return layouts, True, space
     rng = random.Random(1)
     for _ in range(ENUMERATION_CAP):
@@ -111,22 +98,18 @@ def enumerate_layouts(source_order, callee_order, internal):
             p = callee_order[n][:]
             rng.shuffle(p)
             co[n] = p
-        layouts.add(simulate(source_order, co, internal))
+        layouts.add(simulate(co, internal))
     return layouts, False, space
 
 
 def check(src: str) -> dict:
-    captured = capture_call_graph(src)
-    source_order = captured.pop("__source_order__")
-    internal = {n: v["internal"] for n, v in captured.items()}
-    base_callees = {n: v["callees"] for n, v in captured.items()}
-
-    env_layout = simulate(source_order, base_callees, internal)
-    dps = decision_points(source_order, base_callees, internal)
-    layouts, exact, space = enumerate_layouts(source_order, base_callees, internal)
+    callees, internal = call_graph(CompilerData(src))
+    env_layout = simulate(callees, internal)
+    dps = decision_points(callees, internal)
+    layouts, exact, space = enumerate_layouts(callees, internal, env_layout, dps)
 
     return {
-        "internal_fns": sum(internal.values()),
+        "internal_fns": len(internal),
         "decision_points": len(dps),
         "choice_space": space,
         "reachable_layouts": len(layouts),

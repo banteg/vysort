@@ -1,6 +1,5 @@
-"""Brute-force the deployed internal-function layout: enumerate every layout
-reachable by the 0.3.4-0.3.7 call-graph topsort, reorder the source per
-candidate, stock-compile, and compare against the target runtime bytecode.
+"""Match the deployed internal-function layout, falling back to enumeration
+if it cannot be recovered from the target runtime bytecode.
 
 A `prefix` status means the compiled runtime is a prefix of the target and
 the remainder is the appended immutable tail. In `single` mode (unaffected
@@ -15,14 +14,18 @@ progress on stderr.
 
 import json
 import pathlib
+import re
 import sys
 
 import vyper
-from check import capture_call_graph, enumerate_layouts, simulate
+import vyper.evm.opcodes as evm_ops
+from check import call_graph, decision_points, enumerate_layouts, simulate
 from recover import recover_layout
 from reorder import reorder
+from vyper.compiler.phases import CompilerData
 
-EVM_VERSION = sys.argv[4] if len(sys.argv) > 4 else None
+EIP1167_RE = re.compile(r"363d3d373d3d3d363d73([0-9a-f]{40})5af43d82803e903d91602b57fd5bf3")
+EVM_VERSION = None
 
 
 def compile_runtime(src: str) -> bytes:
@@ -48,18 +51,31 @@ def match_single(src: str, target: bytes) -> dict:
 
 
 def match_brute(src: str, target: bytes) -> dict:
-    # layout recovery first: decode the deployed order straight off the
-    # bytecode, then one reordered stock compile to verify — 2 compiles
-    # total regardless of how many layouts are reachable
-    # a decode crash must not kill the worker — brute force still rescues
-    # 25 of the 26 at-risk mainnet runtimes if recovery hits an unknown
-    # edge case (the decode found new ones in both validation rounds)
+    proxy = EIP1167_RE.fullmatch(target.hex())
+    if proxy:
+        return {"status": "unsupported_minimal_proxy", "implementation": "0x" + proxy.group(1)}
+
+    data = CompilerData(src)
+    callees, internal = call_graph(data)
+    env_layout = simulate(callees, internal)
+    decisions = decision_points(callees, internal)
+    if not decisions:
+        verdict = compare(target, data.bytecode_runtime)
+        if verdict:
+            return {
+                **verdict,
+                "method": "single",
+                "layout": list(env_layout),
+                "reachable_layouts": 1,
+                "compiles": 1,
+                "source": src,
+            }
+
+    # An unexpected compiler assembly shape can still match via enumeration.
     try:
-        rec = recover_layout(src, target, EVM_VERSION)
-    except Exception as e:
+        rec = recover_layout(data, target)
+    except Exception as e:  # noqa: BLE001
         rec = {"status": f"recover_error: {type(e).__name__}: {e}"}
-    if rec["status"] == "unsupported_minimal_proxy":
-        return rec
     if rec["status"] == "initcode_passed":
         return rec
     if rec["status"] == "decoded":
@@ -77,12 +93,7 @@ def match_brute(src: str, target: bytes) -> dict:
     else:
         print(f"layout recovery unavailable ({rec['status']}), falling back to brute force", file=sys.stderr)
 
-    captured = capture_call_graph(src)
-    source_order = captured.pop("__source_order__")
-    internal = {n: v["internal"] for n, v in captured.items()}
-    base_callees = {n: v["callees"] for n, v in captured.items()}
-    env_layout = simulate(source_order, base_callees, internal)
-    layouts, exact, space = enumerate_layouts(source_order, base_callees, internal)
+    layouts, exact, space = enumerate_layouts(callees, internal, env_layout, decisions)
     if not exact:
         return {
             "status": "layout_space_too_large",
@@ -117,5 +128,10 @@ if __name__ == "__main__":
     hex_str = "".join(pathlib.Path(sys.argv[2]).read_text().split()).removeprefix("0x")
     target = bytes.fromhex(hex_str)
     mode = sys.argv[3]
-    out = match_single(src, target) if mode == "single" else match_brute(src, target)
+    EVM_VERSION = sys.argv[4] if len(sys.argv) > 4 else None
+    if mode == "single":
+        out = match_single(src, target)
+    else:
+        # CompilerData reads the active EVM version set by Vyper's wrapper.
+        out = evm_ops.evm_wrapper(match_brute)(src, target, evm_version=EVM_VERSION)
     print(json.dumps(out, indent=2))
