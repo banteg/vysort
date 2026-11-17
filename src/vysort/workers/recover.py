@@ -5,28 +5,23 @@ bytecode in 1 instrumented compile plus an offline decode (no search):
      function's section boundaries (entry-label pcs) and all code-symbol
      PUSH2 operand positions, masking only operands whose target lies in
      the movable internal region;
-  2. decode the deployed section order by masked comparison (no compiles).
-
-Section lengths are order-invariant, so the decode terminates with the full
-deployed permutation regardless of how many layouts are reachable.
+  2. read deployed entry addresses from callers' PUSH2 operands and use
+     masked comparison to place any sections with no known entry address.
 
 Handles: shared revert/postamble after the last internal function (excluded
 from the movable region), cleanup-only internals (no emitted main label —
 anchored to the host section containing their cleanup pc and re-inserted
-into the proof order), and EIP-1167 minimal proxies (classified, not
-decoded).
+into the proof order).
 
 Self-contained worker module: runs in an ephemeral `uv run --with vyper==X`
 env; used by match.py, not invoked directly.
 """
 
-import re
+from bisect import bisect_right
+from collections import defaultdict
 
-import vyper.evm.opcodes as evm_ops
 from vyper.compiler.phases import CompilerData
 from vyper.ir.compile_ir import is_mem_sym, is_ofst, is_symbol
-
-EIP1167_RE = re.compile(r"^363d3d373d3d3d363d73([0-9a-f]{40})5af43d82803e903d91602b57fd5bf3$")
 
 
 def scan(assembly):
@@ -57,29 +52,47 @@ def scan(assembly):
     return labels, refs, pc
 
 
-def recover_layout(src: str, onchain: bytes, evm_version=None) -> dict:
-    """One instrumented compile + offline decode of the deployed order.
+def locate_entries(onchain, calls, sections, bounds, eq_masked):
+    """Follow named calls from the fixed external region through located callers."""
+    by_pc, located = {}, set()
+    pending = [(None, 0)]  # the external region starts at zero
+    while pending:
+        caller, start = pending.pop()
+        for offset, callee in calls[caller]:
+            operand = start + offset
+            dest = int.from_bytes(onchain[operand : operand + 2], "big")
+            if by_pc.get(dest) == callee:
+                continue
+            lo, hi = sections[callee]
+            if (
+                callee in located
+                or dest in by_pc
+                or dest < bounds[0]
+                or dest + (hi - lo) > bounds[-1]
+                or not eq_masked(dest, lo, hi)
+            ):
+                # Conflicting hints or different section boundaries. Leave
+                # the original masked decoder available in this case.
+                return {}
+            by_pc[dest] = callee
+            located.add(callee)
+            pending.append((callee, dest))
+    return by_pc
 
-    Returns {"status": "decoded", "proof_order": [...], ...} on success;
-    other statuses: unsupported_minimal_proxy, too_few_sections,
-    initcode_passed, decode_failed."""
-    m = EIP1167_RE.match(onchain.hex())
-    if m:
-        return {"status": "unsupported_minimal_proxy", "implementation": "0x" + m.group(1)}
 
-    if evm_version:
-        # 0.3.x anchors the evm version in a module global (no kwarg on CompilerData)
-        evm_ops.active_evm_version = evm_ops.EVM_VERSIONS[evm_version]
-    data = CompilerData(src)
+def recover_layout(data: CompilerData, onchain: bytes) -> dict:
+    """Decode the deployed order using the original compile's cached assembly."""
     bc = data.bytecode_runtime
     internal_sigs = {n: s for n, s in data.function_signatures.items() if s.internal}
     labels, refs, code_end = scan(data.assembly_runtime)
 
-    starts, missing = {}, []
+    starts, entry_names, missing = {}, {}, []
     for name, sig in internal_sigs.items():
-        main_pc = labels.get("_sym_" + sig.internal_function_label)
+        entry = "_sym_" + sig.internal_function_label
+        main_pc = labels.get(entry)
         if main_pc is not None:
             starts[name] = main_pc
+            entry_names[entry] = name
         else:
             missing.append((name, sig))
 
@@ -127,12 +140,22 @@ def recover_layout(src: str, onchain: bytes, evm_version=None) -> dict:
     # main loop; it resolves to code_end, which is layout-invariant.
     labels.setdefault("_sym_code_end", code_end)
     mask = set()
+    calls = defaultdict(list)
     for operand_pc, sym in refs:
         target = labels.get(sym)
         if target is None:
             raise AssertionError(f"reference to undefined symbol {sym}")
         if movable_start <= target < movable_end:
             mask.update((operand_pc, operand_pc + 1))
+        # Only a direct reference encodes the absolute entry address.
+        if (
+            sym in entry_names
+            and operand_pc < movable_end
+            and int.from_bytes(bc[operand_pc : operand_pc + 2], "big") == target
+        ):
+            i = bisect_right(bounds, operand_pc) - 1
+            caller = order[i] if i >= 0 else None
+            calls[caller].append((operand_pc - starts.get(caller, 0), entry_names[sym]))
 
     def eq_masked(off, lo, hi):
         if off + (hi - lo) > len(onchain):
@@ -158,22 +181,28 @@ def recover_layout(src: str, onchain: bytes, evm_version=None) -> dict:
                 "hint": "pass deployed runtime bytecode from eth_getCode/cast code, or extract/simulate the creation result before matching",
             }
 
+    by_pc = locate_entries(onchain, calls, sections, bounds, eq_masked) if external_ok else {}
+    pinned = set(by_pc.values())
     cursor, deployed, remaining = movable_start, [], set(order)
     while remaining:
-        for f in sorted(remaining):
-            lo, hi = sections[f]
-            if eq_masked(cursor, lo, hi):
-                deployed.append(f)
-                remaining.discard(f)
-                cursor += hi - lo
-                break
-        else:
-            return {
-                "status": "decode_failed",
-                "reason": f"no section matches at offset {cursor}",
-                "recovered_so_far": deployed,
-                "external_region_ok": external_ok,
-            }
+        f = by_pc.get(cursor)
+        if f not in remaining:
+            next_entry = min((pc for pc in by_pc if pc > cursor), default=movable_end)
+            for f in sorted(remaining - pinned):
+                lo, hi = sections[f]
+                if cursor + (hi - lo) <= next_entry and eq_masked(cursor, lo, hi):
+                    break
+            else:
+                return {
+                    "status": "decode_failed",
+                    "reason": f"no section matches at offset {cursor}",
+                    "recovered_so_far": deployed,
+                    "external_region_ok": external_ok,
+                }
+        deployed.append(f)
+        remaining.remove(f)
+        lo, hi = sections[f]
+        cursor += hi - lo
 
     proof_order = []
     for f in deployed:

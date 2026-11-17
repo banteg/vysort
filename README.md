@@ -68,15 +68,16 @@ Vyper's `-f bytecode_runtime`). If you accidentally pass Vyper `-f bytecode`
 creation bytecode, vysort reports the embedded runtime offset instead of
 falling into layout brute force.
 
-The deployed layout is recovered in 2 compiles regardless of contract size:
-one instrumented compile maps each internal function's section boundaries and
-masks the layout-dependent address bytes, the deployed order is then decoded
-straight off the on-chain bytes, and one reordered stock compile verifies it
-byte-exactly — `exact`, or `prefix` when the deployed code carries an appended
-immutable tail. If the decode hits an edge case, reachable layouts are
-brute-forced one compile at a time as a fallback. For unaffected compiler
-versions a single compile-and-compare runs instead. `--evm-version istanbul`
-helps pre-berlin deployments whose nonreentrant lock constants differ.
+If the call graph has zero decision points and the original source matches,
+vysort returns it after one compile. To recover a different layout, vysort
+reads deployed jump addresses to identify internal functions, including ones
+with identical bodies. It compares section bytes with movable addresses
+masked and verifies the rewritten source with a second stock compile. The
+result is `exact`, or `prefix` when the deployed code carries an appended
+immutable tail. If recovery fails, vysort tries the reachable layouts when
+the permutation count fits its enumeration cap. Unaffected compiler versions
+use a single compile and comparison. `--evm-version istanbul` helps
+pre-berlin deployments whose nonreentrant lock constants differ.
 
 The matched source written by `-o` is ordinary vyper that any stock compiler
 of that version turns into the deployed bytecode — auxdata contains no source
